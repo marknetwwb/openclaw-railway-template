@@ -70,8 +70,29 @@ const INTERNAL_GATEWAY_PORT = Number.parseInt(
 const INTERNAL_GATEWAY_HOST = process.env.INTERNAL_GATEWAY_HOST ?? "127.0.0.1";
 const GATEWAY_TARGET = `http://${INTERNAL_GATEWAY_HOST}:${INTERNAL_GATEWAY_PORT}`;
 
-const OPENCLAW_ENTRY =
-  process.env.OPENCLAW_ENTRY?.trim() || "/openclaw/dist/entry.js";
+function resolveOpenclawEntry() {
+  const envEntry = process.env.OPENCLAW_ENTRY?.trim();
+  const candidates = [
+    envEntry,
+    "/openclaw/dist/entry.js",
+    "/usr/local/lib/node_modules/openclaw/dist/entry.js",
+  ].filter(Boolean);
+
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) return candidate;
+  }
+
+  if (envEntry) {
+    console.warn(
+      `[openclaw] OPENCLAW_ENTRY not found at ${envEntry}; falling back to ${candidates[1]}`,
+    );
+  }
+
+  // Preserve previous behavior if no candidate exists yet.
+  return candidates[1];
+}
+
+const OPENCLAW_ENTRY = resolveOpenclawEntry();
 const OPENCLAW_NODE = process.env.OPENCLAW_NODE?.trim() || "node";
 
 const ENABLE_WEB_TUI = process.env.ENABLE_WEB_TUI?.toLowerCase() === "true";
