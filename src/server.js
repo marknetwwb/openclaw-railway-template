@@ -18,6 +18,8 @@ const WORKSPACE_DIR =
   path.join(STATE_DIR, "workspace");
 
 const SETUP_PASSWORD = process.env.SETUP_PASSWORD?.trim();
+const CONTROL_UI_ALLOWED_ORIGINS =
+  process.env.OPENCLAW_CONTROL_UI_ALLOWED_ORIGINS?.trim() || "";
 
 const LOG_FILE = path.join(STATE_DIR, "server.log");
 const LOG_RING_BUFFER_MAX = 1000;
@@ -176,6 +178,114 @@ let shuttingDown = false;
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+function parseOrigins(raw) {
+  const value = raw?.trim();
+  if (!value) return [];
+
+  if (value.startsWith("[")) {
+    try {
+      const parsed = JSON.parse(value);
+      if (Array.isArray(parsed)) {
+        return parsed.map((v) => String(v));
+      }
+    } catch {}
+  }
+
+  return value
+    .split(/[\s,]+/)
+    .map((v) => v.trim())
+    .filter(Boolean);
+}
+
+function normalizeOrigin(originLike) {
+  const value = originLike?.trim();
+  if (!value) return null;
+  if (value === "*") return value;
+  try {
+    if (value.startsWith("http://") || value.startsWith("https://")) {
+      return new URL(value).origin;
+    }
+    return new URL(`https://${value}`).origin;
+  } catch {
+    return null;
+  }
+}
+
+function addOrigin(set, originLike) {
+  const normalized = normalizeOrigin(originLike);
+  if (normalized) set.add(normalized);
+}
+
+function computeControlUiAllowedOrigins(req) {
+  const origins = new Set();
+
+  addOrigin(origins, "http://localhost");
+  addOrigin(origins, "http://127.0.0.1");
+  addOrigin(origins, `http://localhost:${PORT}`);
+  addOrigin(origins, `http://127.0.0.1:${PORT}`);
+
+  for (const railwayValue of [
+    process.env.RAILWAY_PUBLIC_DOMAIN,
+    process.env.RAILWAY_STATIC_URL,
+    process.env.RAILWAY_PUBLIC_URL,
+    process.env.RAILWAY_URL,
+  ]) {
+    addOrigin(origins, railwayValue);
+  }
+
+  for (const fromEnv of parseOrigins(CONTROL_UI_ALLOWED_ORIGINS)) {
+    addOrigin(origins, fromEnv);
+  }
+
+  if (req) {
+    const host = String(req.headers["x-forwarded-host"] || req.headers.host || "")
+      .split(",")[0]
+      .trim();
+    const proto = String(req.headers["x-forwarded-proto"] || "")
+      .split(",")[0]
+      .trim() || (req.socket?.encrypted ? "https" : "http");
+    if (host) {
+      addOrigin(origins, `${proto}://${host}`);
+    }
+    addOrigin(origins, String(req.headers.origin || ""));
+  }
+
+  return [...origins];
+}
+
+let allowedOriginsHash = null;
+
+async function ensureControlUiAllowedOrigins(req) {
+  if (!isConfigured()) return { changed: false };
+
+  const origins = computeControlUiAllowedOrigins(req);
+  if (!origins.length) return { changed: false };
+
+  const originsJson = JSON.stringify(origins);
+  const nextHash = crypto.createHash("sha1").update(originsJson).digest("hex");
+  if (nextHash === allowedOriginsHash) {
+    return { changed: false, origins };
+  }
+
+  const result = await runCmd(
+    OPENCLAW_NODE,
+    clawArgs([
+      "config",
+      "set",
+      "--json",
+      "gateway.controlUi.allowedOrigins",
+      originsJson,
+    ]),
+  );
+  allowedOriginsHash = nextHash;
+
+  return {
+    changed: true,
+    origins,
+    result,
+  };
 }
 
 async function waitForGatewayReady(opts = {}) {
@@ -701,6 +811,11 @@ app.post("/setup/api/run", requireSetupAuth, async (req, res) => {
       );
       extra += `[config] gateway.trustedProxies exit=${proxiesResult.code}\n`;
 
+      const allowedOriginsResult = await ensureControlUiAllowedOrigins();
+      if (allowedOriginsResult.changed) {
+        extra += `[config] gateway.controlUi.allowedOrigins exit=${allowedOriginsResult.result.code} count=${allowedOriginsResult.origins.length}\n`;
+      }
+
       if (payload.model?.trim()) {
         extra += `[setup] Setting model to ${payload.model.trim()}...\n`;
         const modelResult = await runCmd(
@@ -1149,6 +1264,12 @@ app.use(async (req, res) => {
   }
 
   if (isConfigured()) {
+    const originUpdate = await ensureControlUiAllowedOrigins(req);
+    if (originUpdate.changed && isGatewayReady()) {
+      console.log("[gateway] updated gateway.controlUi.allowedOrigins; restarting gateway");
+      await restartGateway();
+    }
+
     if (!isGatewayReady()) {
       try {
         await ensureGatewayRunning();
@@ -1188,6 +1309,12 @@ const server = app.listen(PORT, () => {
         if (dr.output) log.info("wrapper", dr.output);
       } catch (err) {
         log.warn("wrapper", `doctor --fix failed: ${err.message}`);
+      }
+      const originUpdate = await ensureControlUiAllowedOrigins();
+      if (originUpdate.changed) {
+        console.log(
+          `[wrapper] configured gateway.controlUi.allowedOrigins (${originUpdate.origins.length} origins)`,
+        );
       }
       await ensureGatewayRunning();
     })().catch((err) => {

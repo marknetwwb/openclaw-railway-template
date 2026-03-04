@@ -105,6 +105,10 @@ A: Go to `/setup` on your deployed instance. When prompted for credentials, use 
 
 A: Go back to `/setup` and click the "Open OpenClaw UI" button from there. The setup page passes the required auth token to the UI. Accessing the UI directly without the token will cause connection errors.
 
+**Q: I see "origin not allowed (open the Control UI from the gateway host or allow it in gateway.controlUi.allowedOrigins)". How do I fix it?**
+
+A: Redeploy with the latest template code so the wrapper auto-configures `gateway.controlUi.allowedOrigins` for your Railway host. If you use custom domains, set `OPENCLAW_CONTROL_UI_ALLOWED_ORIGINS` (comma-separated or JSON array) in Railway Variables and redeploy.
+
 **Q: I don't see the TUI option on the setup page.**
 
 A: Make sure `ENABLE_WEB_TUI=true` is set in your Railway Variables and redeploy. The web terminal is disabled by default.
